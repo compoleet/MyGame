@@ -2,8 +2,9 @@ import asyncio
 import websockets
 import json
 import random
+import math
 from sqlalchemy import select
-from game_engine import create_stats_by_class, CharacterStats
+from game_engine import create_stats_by_class
 from database import AsyncSessionLocal, Player, PlayerClass
 
 players = {}
@@ -11,10 +12,56 @@ mobs = {}
 next_mob_id = 1
 
 MOB_TYPES = {
-    "slime": {"hp": 50, "attack": 15, "exp": 20, "color": "green"},
-    "goblin": {"hp": 80, "attack": 25, "exp": 40, "color": "brown"},
+    "slime": {"hp": 50, "attack": 15, "exp": 20, "level": 3},
+    "goblin": {"hp": 80, "attack": 25, "exp": 40, "level": 8},
 }
-RESPAWN_TIME = 10
+RESPAWN_TIME = 7
+
+# Параметры мира
+WORLD_SIZE = 100000
+CITY_CENTER = WORLD_SIZE // 2   # 50000
+CITY_RADIUS = 500               # город 1000x1000 (квадрат)
+SAFE_ZONE_RADIUS = CITY_RADIUS
+
+# Зоны спавна мобов по уровням (расстояние от центра города)
+LEVEL_ZONES = {
+    1: (CITY_RADIUS + 50, CITY_RADIUS + 250),   # уровни 1-5
+    2: (CITY_RADIUS + 50, CITY_RADIUS + 250),
+    3: (CITY_RADIUS + 50, CITY_RADIUS + 250),
+    4: (CITY_RADIUS + 50, CITY_RADIUS + 250),
+    5: (CITY_RADIUS + 50, CITY_RADIUS + 250),
+    6: (CITY_RADIUS + 300, CITY_RADIUS + 600),  # уровни 6-10
+    7: (CITY_RADIUS + 300, CITY_RADIUS + 600),
+    8: (CITY_RADIUS + 300, CITY_RADIUS + 600),
+    9: (CITY_RADIUS + 300, CITY_RADIUS + 600),
+    10: (CITY_RADIUS + 300, CITY_RADIUS + 600),
+}
+
+def is_in_safe_zone(x, y):
+    return abs(x - CITY_CENTER) <= CITY_RADIUS and abs(y - CITY_CENTER) <= CITY_RADIUS
+
+def get_mob_spawn_zone(mob_level):
+    for lvl in range(mob_level, 0, -1):
+        if lvl in LEVEL_ZONES:
+            return LEVEL_ZONES[lvl]
+    return (CITY_RADIUS + 50, CITY_RADIUS + 250)
+
+def get_random_point_in_zone(min_dist, max_dist):
+    angle = random.uniform(0, 2*math.pi)
+    dist = random.randint(min_dist, max_dist)
+    x = CITY_CENTER + int(dist * math.cos(angle))
+    y = CITY_CENTER + int(dist * math.sin(angle))
+    x = max(0, min(WORLD_SIZE, x))
+    y = max(0, min(WORLD_SIZE, y))
+    return x, y
+
+def spawn_initial_mobs():
+    for mob_type, info in MOB_TYPES.items():
+        mob_level = info["level"]
+        min_dist, max_dist = get_mob_spawn_zone(mob_level)
+        for _ in range(5):
+            x, y = get_random_point_in_zone(min_dist, max_dist)
+            spawn_mob(x, y, mob_type)
 
 # ------------------------------------------------------------
 # Функции работы с БД
@@ -45,7 +92,7 @@ async def create_player_in_db(username: str, password: str, class_name: str, sta
             base_int=stats_allocation.get('int', 5),
             base_cha=stats_allocation.get('cha', 5),
             base_lck=stats_allocation.get('lck', 5),
-            x=500, y=500,
+            x=CITY_CENTER, y=CITY_CENTER,
             level=1,
             exp=0
         )
@@ -182,6 +229,8 @@ async def handle_auth(websocket, data, player_id):
 async def handle_move(player_id, data):
     new_x = data.get("x")
     new_y = data.get("y")
+    new_x = max(0, min(WORLD_SIZE, new_x))
+    new_y = max(0, min(WORLD_SIZE, new_y))
     set_player_position(player_id, new_x, new_y)
     for pid, pdata in players.items():
         if pid != player_id:
@@ -195,6 +244,9 @@ async def handle_attack(player_id, data):
         return
     attacker = players[player_id]
     defender = players[target_id]
+    if is_in_safe_zone(attacker["x"], attacker["y"]) or is_in_safe_zone(defender["x"], defender["y"]):
+        await attacker["websocket"].send(json.dumps({"type": "error", "message": "Cannot attack in safe zone"}))
+        return
     dist = abs(attacker["x"] - defender["x"]) + abs(attacker["y"] - defender["y"])
     if dist > get_attack_range(attacker["class"]):
         await attacker["websocket"].send(json.dumps({"type": "error", "message": "Too far"}))
@@ -207,16 +259,22 @@ async def handle_attack(player_id, data):
     await defender["websocket"].send(json.dumps({"type": "attacked", "attacker_id": player_id, "damage": damage, "your_hp": defender["stats"].current_hp}))
     if defender["stats"].current_hp <= 0:
         defender["stats"].current_hp = defender["stats"].calculate_health()
-        set_player_position(target_id, 500, 500)
-        await defender["websocket"].send(json.dumps({"type": "respawn", "x": 500, "y": 500, "hp": defender["stats"].current_hp}))
+        set_player_position(target_id, CITY_CENTER, CITY_CENTER)
+        await defender["websocket"].send(json.dumps({"type": "respawn", "x": CITY_CENTER, "y": CITY_CENTER, "hp": defender["stats"].current_hp}))
         for pid, pdata in players.items():
             if pid != target_id:
-                await pdata["websocket"].send(json.dumps({"type": "move", "player_id": target_id, "x": 500, "y": 500}))
+                await pdata["websocket"].send(json.dumps({"type": "move", "player_id": target_id, "x": CITY_CENTER, "y": CITY_CENTER}))
 
 # ------------------------------------------------------------
 # Мобы
 # ------------------------------------------------------------
 def spawn_mob(x, y, mob_type="slime"):
+    if is_in_safe_zone(x, y):
+        angle = math.atan2(y - CITY_CENTER, x - CITY_CENTER)
+        x = CITY_CENTER + int((CITY_RADIUS + 10) * math.cos(angle))
+        y = CITY_CENTER + int((CITY_RADIUS + 10) * math.sin(angle))
+        x = max(0, min(WORLD_SIZE, x))
+        y = max(0, min(WORLD_SIZE, y))
     global next_mob_id
     mob_id = next_mob_id
     next_mob_id += 1
@@ -224,7 +282,8 @@ def spawn_mob(x, y, mob_type="slime"):
     mobs[mob_id] = {
         "id": mob_id, "x": x, "y": y, "type": mob_type,
         "hp": mob_info["hp"], "max_hp": mob_info["hp"],
-        "attack": mob_info["attack"], "exp": mob_info["exp"]
+        "attack": mob_info["attack"], "exp": mob_info["exp"],
+        "level": mob_info["level"]
     }
     for pid, pdata in players.items():
         asyncio.create_task(pdata["websocket"].send(json.dumps({
@@ -236,6 +295,12 @@ def spawn_mob(x, y, mob_type="slime"):
 async def move_mob(mob_id, new_x, new_y):
     if mob_id not in mobs:
         return
+    if is_in_safe_zone(new_x, new_y):
+        angle = math.atan2(new_y - CITY_CENTER, new_x - CITY_CENTER)
+        new_x = CITY_CENTER + int((CITY_RADIUS + 5) * math.cos(angle))
+        new_y = CITY_CENTER + int((CITY_RADIUS + 5) * math.sin(angle))
+    new_x = max(0, min(WORLD_SIZE, new_x))
+    new_y = max(0, min(WORLD_SIZE, new_y))
     mobs[mob_id]["x"] = new_x
     mobs[mob_id]["y"] = new_y
     for pid, pdata in players.items():
@@ -260,25 +325,27 @@ async def mob_attack(mob_id, player_id):
     await players[player_id]["websocket"].send(json.dumps({"type": "attacked_by_mob", "mob_id": mob_id, "damage": damage, "your_hp": defender.current_hp}))
     if defender.current_hp <= 0:
         defender.current_hp = defender.calculate_health()
-        set_player_position(player_id, 500, 500)
-        await players[player_id]["websocket"].send(json.dumps({"type": "respawn", "x": 500, "y": 500, "hp": defender.current_hp}))
+        set_player_position(player_id, CITY_CENTER, CITY_CENTER)
+        await players[player_id]["websocket"].send(json.dumps({"type": "respawn", "x": CITY_CENTER, "y": CITY_CENTER, "hp": defender.current_hp}))
         for pid, pdata in players.items():
             if pid != player_id:
-                await pdata["websocket"].send(json.dumps({"type": "move", "player_id": player_id, "x": 500, "y": 500}))
+                await pdata["websocket"].send(json.dumps({"type": "move", "player_id": player_id, "x": CITY_CENTER, "y": CITY_CENTER}))
 
 async def mob_ai():
     while True:
         await asyncio.sleep(2)
         for mob_id, mob in list(mobs.items()):
             if random.random() < 0.5:
-                dx = random.randint(-2, 2)
-                dy = random.randint(-2, 2)
-                new_x = max(0, min(1000, mob["x"] + dx))
-                new_y = max(0, min(1000, mob["y"] + dy))
+                dx = random.randint(-15, 15)
+                dy = random.randint(-15, 15)
+                new_x = mob["x"] + dx
+                new_y = mob["y"] + dy
                 await move_mob(mob_id, new_x, new_y)
             nearest = None
             min_dist = 200
             for pid, pdata in players.items():
+                if is_in_safe_zone(pdata["x"], pdata["y"]):
+                    continue
                 dist = abs(pdata["x"] - mob["x"]) + abs(pdata["y"] - mob["y"])
                 if dist < min_dist:
                     min_dist = dist
@@ -288,8 +355,9 @@ async def mob_ai():
 
 async def respawn_mob_after_delay(mob_type, x, y):
     await asyncio.sleep(RESPAWN_TIME)
-    new_x = random.randint(50, 950)
-    new_y = random.randint(50, 950)
+    mob_level = MOB_TYPES[mob_type]["level"]
+    min_dist, max_dist = get_mob_spawn_zone(mob_level)
+    new_x, new_y = get_random_point_in_zone(min_dist, max_dist)
     spawn_mob(new_x, new_y, mob_type)
 
 async def handle_attack_mob(player_id, data, websocket):
@@ -298,6 +366,9 @@ async def handle_attack_mob(player_id, data, websocket):
         return
     attacker = players[player_id]
     mob = mobs[mob_id]
+    if is_in_safe_zone(attacker["x"], attacker["y"]):
+        await websocket.send(json.dumps({"type": "error", "message": "Cannot attack in safe zone"}))
+        return
     dist = abs(attacker["x"] - mob["x"]) + abs(attacker["y"] - mob["y"])
     if dist > get_attack_range(attacker["class"]):
         await websocket.send(json.dumps({"type": "error", "message": "Too far from mob"}))
@@ -305,17 +376,23 @@ async def handle_attack_mob(player_id, data, websocket):
     damage = int(attacker["stats"].get_total_stat("str") * 2 + random.randint(5, 15))
     mob["hp"] -= damage
     await websocket.send(json.dumps({"type": "mob_attacked", "mob_id": mob_id, "damage": damage, "hp": mob["hp"]}))
+    print(f"Player {player_id} attacked mob {mob_id}, damage {damage}, mob hp {mob['hp']}")
     if mob["hp"] <= 0:
         attacker["exp"] += mob["exp"]
         exp_needed = 100 * attacker["level"]
-        if attacker["exp"] >= exp_needed:
+        while attacker["exp"] >= exp_needed:
             attacker["level"] += 1
             attacker["exp"] -= exp_needed
-            await websocket.send(json.dumps({"type": "level_up", "level": attacker["level"]}))
+            exp_needed = 100 * attacker["level"]
+        await websocket.send(json.dumps({
+            "type": "exp_update",
+            "exp": attacker["exp"],
+            "level": attacker["level"]
+        }))
+        print(f"Player {player_id} killed mob, exp now {attacker['exp']}, level {attacker['level']}")
         mob_type = mob["type"]
-        mob_x, mob_y = mob["x"], mob["y"]
         await despawn_mob(mob_id)
-        asyncio.create_task(respawn_mob_after_delay(mob_type, mob_x, mob_y))
+        asyncio.create_task(respawn_mob_after_delay(mob_type, mob["x"], mob["y"]))
 
 # ------------------------------------------------------------
 # Диспетчер сообщений
@@ -338,7 +415,6 @@ async def handle_player_input(websocket):
                 class_name = data.get("class", "warrior")
                 allocation = data.get("allocation")
                 if not allocation:
-                    # fallback (старый способ)
                     if class_name.lower() == "warrior":
                         allocation = {"str": 5+25, "spd": 5, "vit": 5+20, "int": 5, "cha": 5, "lck": 5}
                     elif class_name.lower() == "mage":
@@ -381,9 +457,7 @@ async def handle_player_input(websocket):
 async def main():
     async with websockets.serve(handle_player_input, "localhost", 8765):
         print("Сервер запущен на ws://localhost:8765")
-        spawn_mob(300, 300, "slime")
-        spawn_mob(700, 200, "goblin")
-        spawn_mob(500, 600, "slime")
+        spawn_initial_mobs()
         asyncio.create_task(mob_ai())
         await asyncio.Future()
 

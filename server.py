@@ -108,7 +108,12 @@ def calculate_damage(attacker_stats, defender_stats, weapon_damage=30):
         final_damage = int(final_damage * 1.5)
         print("Крит!")
     return max(1, final_damage)
-
+def get_attack_range(class_name: str) -> int:
+    ranged = ["mage", "archer", "buffer"]   # дальний бой
+    if class_name.lower() in ranged:
+        return 150
+    else:
+        return 30
 # ------------------------------------------------------------
 # Функции для спавна/деспавна игроков
 # ------------------------------------------------------------

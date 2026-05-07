@@ -25,6 +25,9 @@ SAFE_ZONE_RADIUS = CITY_RADIUS
 BASE_MOVE_STEP = 4
 MAX_MOVE_STEP = 20
 
+CHAR_WINDOW_WIDTH = 640
+CHAR_WINDOW_HEIGHT = 480
+
 def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
@@ -72,7 +75,7 @@ class LoginScreen:
         self.error_msg = ""
 
     def handle_event(self, event):
-        if event.type == pygame.MOUSEBUTTONDOWN:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # только левая кнопка
             if self.username_rect.collidepoint(event.pos):
                 self.active_field = "username"
             elif self.password_rect.collidepoint(event.pos):
@@ -289,7 +292,211 @@ class CharacterCreatorScreen:
         return None
 
 # ------------------------------------------------------------
-# Игровой клиент
+# Окно персонажа (инвентарь, статы, квесты, экипировка, навыки, заклинания)
+# ------------------------------------------------------------
+class CharacterWindow:
+    def __init__(self, screen, client):
+        self.screen = screen
+        self.client = client
+        self.visible = False
+        self.active_tab = 0
+        self.tab_names = ["Inventory", "Stats", "Quests", "Equipment", "Skills", "Spells"]
+        self.font = pygame.font.SysFont("Arial", 20)
+        self.small_font = pygame.font.SysFont("Arial", 16)
+        self.rect = pygame.Rect((WIDTH - CHAR_WINDOW_WIDTH)//2,
+                                (HEIGHT - CHAR_WINDOW_HEIGHT)//2,
+                                CHAR_WINDOW_WIDTH, CHAR_WINDOW_HEIGHT)
+        self.context_menu = None
+        self.context_font = pygame.font.SysFont("Arial", 18)
+
+    def toggle(self):
+        self.visible = not self.visible
+        if self.visible:
+            asyncio.run_coroutine_threadsafe(self.client.request_inventory(), self.client.loop)
+        print(f"Window toggled, visible = {self.visible}")
+
+    def handle_event(self, event):
+        if not self.visible:
+            return
+        # Отладочный вывод всех событий мыши
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            print(f"Mouse button: {event.button}, pos: {event.pos}")
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            self.visible = False
+            self.context_menu = None
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 1:  # ЛКМ
+                if self.context_menu:
+                    self.handle_context_click(event.pos)
+                    return
+                tab_width = self.rect.width // len(self.tab_names)
+                for i, name in enumerate(self.tab_names):
+                    tab_rect = pygame.Rect(self.rect.x + i*tab_width, self.rect.y, tab_width, 30)
+                    if tab_rect.collidepoint(event.pos):
+                        self.active_tab = i
+                        self.context_menu = None
+                        break
+                if self.active_tab == 0:
+                    self.handle_inventory_click(event.pos)
+            elif event.button == 3:  # ПКМ
+                print("Right click detected in CharacterWindow")
+                if self.active_tab == 0:
+                    print("Active tab is Inventory")
+                    self.open_context_menu(event.pos)
+                else:
+                    print("Active tab is not Inventory")
+
+    def handle_inventory_click(self, pos):
+        inv = getattr(self.client, 'inventory', [])
+        y_start = self.rect.y + 50
+        index = (pos[1] - y_start) // 25
+        if 0 <= index < len(inv):
+            item = inv[index]
+            if item['slot'] != 'none':
+                asyncio.run_coroutine_threadsafe(self.client.equip_item(item['id'], item['slot']), self.client.loop)
+
+    def open_context_menu(self, pos):
+        print(f"open_context_menu: pos={pos}")
+        inv = getattr(self.client, 'inventory', [])
+        print(f"Inventory has {len(inv)} items")
+        y_start = self.rect.y + 50
+        index = (pos[1] - y_start) // 25
+        print(f"Calculated index = {index}")
+        if 0 <= index < len(inv):
+            item = inv[index]
+            self.context_menu = {
+                'item': item,
+                'pos': pos,
+                'options': ['Use', 'Drop', 'Destroy']
+            }
+            print(f"Context menu set for {item['name']}")
+        else:
+            self.context_menu = None
+            print("No item at this position")
+
+    def handle_context_click(self, pos):
+        if not self.context_menu:
+            return
+        menu_x, menu_y = self.context_menu['pos']
+        menu_width = 120
+        menu_height = len(self.context_menu['options']) * 25
+        if menu_x <= pos[0] <= menu_x + menu_width and menu_y <= pos[1] <= menu_y + menu_height:
+            option_index = (pos[1] - menu_y) // 25
+            if 0 <= option_index < len(self.context_menu['options']):
+                option = self.context_menu['options'][option_index]
+                item = self.context_menu['item']
+                self.handle_item_action(item, option)
+        self.context_menu = None
+
+    def handle_item_action(self, item, action):
+        print(f"Item action: {action} on {item['name']}")
+        if action == "Use":
+            asyncio.run_coroutine_threadsafe(self.client.use_item(item['id']), self.client.loop)
+        elif action == "Drop":
+            asyncio.run_coroutine_threadsafe(self.client.drop_item(item['id']), self.client.loop)
+        elif action == "Destroy":
+            asyncio.run_coroutine_threadsafe(self.client.destroy_item(item['id']), self.client.loop)
+
+    def draw(self):
+        if not self.visible:
+            return
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        self.screen.blit(overlay, (0, 0))
+        pygame.draw.rect(self.screen, (50,50,70), self.rect)
+        pygame.draw.rect(self.screen, (100,100,120), self.rect, 3)
+        tab_width = self.rect.width // len(self.tab_names)
+        for i, name in enumerate(self.tab_names):
+            tab_rect = pygame.Rect(self.rect.x + i*tab_width, self.rect.y, tab_width, 30)
+            color = (80,80,100) if i == self.active_tab else (60,60,80)
+            pygame.draw.rect(self.screen, color, tab_rect)
+            pygame.draw.rect(self.screen, (120,120,140), tab_rect, 1)
+            text = self.font.render(name, True, (255,255,255))
+            text_rect = text.get_rect(center=tab_rect.center)
+            self.screen.blit(text, text_rect)
+        content_rect = pygame.Rect(self.rect.x + 10, self.rect.y + 40,
+                                   self.rect.width - 20, self.rect.height - 50)
+        if self.active_tab == 0:
+            self._draw_inventory(content_rect)
+        elif self.active_tab == 1:
+            self._draw_stats(content_rect)
+        elif self.active_tab == 2:
+            self._draw_quests(content_rect)
+        elif self.active_tab == 3:
+            self._draw_equipment(content_rect)
+        elif self.active_tab == 4:
+            self._draw_skills(content_rect)
+        elif self.active_tab == 5:
+            self._draw_spells(content_rect)
+
+    def _draw_inventory(self, rect):
+        inv = getattr(self.client, 'inventory', [])
+        y = rect.y + 10
+        for idx, item in enumerate(inv):
+            text = self.small_font.render(f"{item['name']} x{item['quantity']}", True, (255,255,255))
+            self.screen.blit(text, (rect.x + 10, y))
+            if item['slot'] != 'none':
+                eq_text = self.small_font.render("[Equip]", True, (200,200,0))
+                self.screen.blit(eq_text, (rect.x + 200, y))
+            y += 25
+        if not inv:
+            text = self.small_font.render("Inventory empty", True, (200,200,200))
+            self.screen.blit(text, (rect.x + 10, rect.y + 10))
+        # Контекстное меню
+        if self.context_menu:
+            print("Drawing context menu")
+            menu = self.context_menu
+            x, y = menu['pos']
+            options = menu['options']
+            mw = 120
+            mh = len(options) * 25
+            # Ограничиваем, чтобы меню не выходило за нижний край окна
+            if y + mh > self.rect.y + self.rect.height:
+                y = y - mh
+            pygame.draw.rect(self.screen, (50,50,70), (x, y, mw, mh))
+            pygame.draw.rect(self.screen, (100,100,120), (x, y, mw, mh), 2)
+            for i, opt in enumerate(options):
+                opt_text = self.context_font.render(opt, True, (255,255,255))
+                self.screen.blit(opt_text, (x + 5, y + i*25 + 4))
+
+    def _draw_stats(self, rect):
+        stats = getattr(self.client, 'my_stats', {})
+        y = rect.y + 10
+        for stat, value in stats.items():
+            text = self.small_font.render(f"{stat.upper()}: {value}", True, (255,255,0))
+            self.screen.blit(text, (rect.x + 10, y))
+            y += 25
+        if not stats:
+            text = self.small_font.render("No stats available", True, (200,200,200))
+            self.screen.blit(text, (rect.x + 10, rect.y + 10))
+
+    def _draw_quests(self, rect):
+        text = self.small_font.render("Quests will be here", True, (200,200,200))
+        self.screen.blit(text, (rect.x + 10, rect.y + 10))
+
+    def _draw_equipment(self, rect):
+        equip = getattr(self.client, 'equipment', {})
+        y = rect.y + 10
+        slots = ["weapon", "head", "chest", "legs", "feet"]
+        for slot in slots:
+            item = equip.get(slot)
+            if item:
+                text = self.small_font.render(f"{slot.capitalize()}: {item['name']}", True, (200,255,200))
+            else:
+                text = self.small_font.render(f"{slot.capitalize()}: empty", True, (150,150,150))
+            self.screen.blit(text, (rect.x + 10, y))
+            y += 25
+
+    def _draw_skills(self, rect):
+        text = self.small_font.render("Skills will be here", True, (200,200,200))
+        self.screen.blit(text, (rect.x + 10, rect.y + 10))
+
+    def _draw_spells(self, rect):
+        text = self.small_font.render("Spells will be here", True, (200,200,200))
+        self.screen.blit(text, (rect.x + 10, rect.y + 10))
+
+# ------------------------------------------------------------
+# Игровой клиент (MMOClient) с поддержкой инвентаря
 # ------------------------------------------------------------
 class MMOClient:
     def __init__(self, uri, username, password):
@@ -308,6 +515,9 @@ class MMOClient:
         self.exp_needed = 100
         self.speed_stat = 5
         self.move_step = BASE_MOVE_STEP
+        self.my_stats = {}
+        self.inventory = []    # список предметов в инвентаре
+        self.equipment = {}    # словарь с экипировкой
         self.running = True
         self.ws = None
         self.loop = None
@@ -316,6 +526,13 @@ class MMOClient:
         self.sprite_size = 48
         self.sprites = {}
         self.load_sprites()
+
+    async def use_item(self, inv_id):
+        await self.ws.send(json.dumps({"type": "use_item", "inv_id": inv_id}))
+    async def drop_item(self, inv_id):
+        await self.ws.send(json.dumps({"type": "drop_item", "inv_id": inv_id}))
+    async def destroy_item(self, inv_id):
+        await self.ws.send(json.dumps({"type": "destroy_item", "inv_id": inv_id}))
 
     def load_sprites(self):
         try:
@@ -356,6 +573,7 @@ class MMOClient:
             self.exp_needed = 100 * self.my_level
             self.speed_stat = data["data"]["stats"]["spd"]
             self.move_step = calculate_move_step(self.speed_stat)
+            self.my_stats = data["data"]["stats"]
             with self.lock:
                 self.players[self.my_id] = (data["data"]["x"], data["data"]["y"], data["data"]["username"], data["data"]["class"])
             print(f"Init OK. My id: {self.my_id}, class: {self.my_class}, level: {self.my_level}, SPD: {self.speed_stat}, speed: {self.move_step}")
@@ -372,6 +590,12 @@ class MMOClient:
             await self.ws.send(json.dumps({"type": "attack", "target_id": target_id}))
         elif target_type == "mob":
             await self.ws.send(json.dumps({"type": "attack_mob", "mob_id": target_id}))
+
+    async def request_inventory(self):
+        await self.ws.send(json.dumps({"type": "get_inventory"}))
+
+    async def equip_item(self, inv_id, slot):
+        await self.ws.send(json.dumps({"type": "equip_item", "inv_id": inv_id, "slot": slot}))
 
     async def receive_loop(self):
         try:
@@ -426,6 +650,21 @@ class MMOClient:
                         self.my_level = data["level"]
                         self.exp_needed = 100 * self.my_level
                         print(f"Опыт: {self.my_exp}/{self.exp_needed}, уровень {self.my_level}")
+                    elif t == "inventory_data":
+                        self.inventory = data["inventory"]
+                        self.equipment = data["equipment"]
+                        print(f"Получен инвентарь: {len(self.inventory)} предметов")
+                    elif t == "hp_update":
+                        self.my_hp = data["hp"]
+                        print(f"HP updated to {self.my_hp}")
+                    elif t == "item_action_result":
+                        if data["success"]:
+                            print(f"Item {data['action']} successful")
+                            # Обновить инвентарь после действия
+                            await self.request_inventory()
+                        else:
+                            print(f"Item {data['action']} failed")   
+
         except websockets.exceptions.ConnectionClosed:
             print("Connection closed")
         self.running = False
@@ -461,7 +700,7 @@ class MMOClient:
 
     def get_attack_range(self):
         ranged = ["mage", "archer", "buffer"]
-        return 150 if self.my_class in ranged else 30
+        return 180 if self.my_class in ranged else 50
 
     def find_nearest_enemy(self):
         my_x, my_y = self.get_my_position()
@@ -503,7 +742,7 @@ class MMOClient:
             self.loop.call_soon_threadsafe(self.loop.stop)
 
 # ------------------------------------------------------------
-# Отрисовка мира
+# Отрисовка мира (без изменений)
 # ------------------------------------------------------------
 def draw_game(screen, client, camera_x, camera_y, show_radius):
     screen.fill(BG_COLOR)
@@ -580,20 +819,26 @@ def draw_game(screen, client, camera_x, camera_y, show_radius):
         coord_font = pygame.font.SysFont(None, 24)
         coord_text = coord_font.render(f"Speed: {client.move_step}  (Ctrl - radius)", True, (255,255,255))
         screen.blit(coord_text, (10, 10))
-    pygame.display.flip()
 
 # ------------------------------------------------------------
 # Главный цикл
 # ------------------------------------------------------------
+async def request_inventory(self):
+    try:
+        await self.ws.send(json.dumps({"type": "get_inventory"}))
+    except Exception as e:
+        print(f"Error requesting inventory: {e}")
+
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("MMORPG Client - Speed from SPD")
+    pygame.display.set_caption("MMORPG Client - Inventory & Equipment")
 
     current_screen = "login"
     login = LoginScreen(screen)
     creator = None
     client = None
+    char_window = None
     clock = pygame.time.Clock()
     running = True
 
@@ -610,6 +855,7 @@ def main():
                         client.start()
                         time.sleep(1)
                         if client.my_id is not None:
+                            char_window = CharacterWindow(screen, client)
                             current_screen = "game"
                         else:
                             login.error_msg = "Auth failed. Check server."
@@ -650,6 +896,7 @@ def main():
                         client.start()
                         time.sleep(1)
                         if client.my_id is not None:
+                            char_window = CharacterWindow(screen, client)
                             current_screen = "game"
                         else:
                             login.error_msg = "Auto-login failed after registration"
@@ -670,11 +917,14 @@ def main():
                     elif event.type == pygame.KEYDOWN:
                         if event.key == pygame.K_SPACE:
                             client.attack_nearest()
+                        elif event.key == pygame.K_i:
+                            char_window.toggle()
                         elif event.key in (pygame.K_LCTRL, pygame.K_RCTRL):
                             show_radius = not show_radius
                             print(f"Radius {'shown' if show_radius else 'hidden'}")
                         elif event.key == pygame.K_F11:
                             pygame.display.toggle_fullscreen()
+                    char_window.handle_event(event)
                 keys = pygame.key.get_pressed()
                 dx = dy = 0
                 if keys[pygame.K_a] or keys[pygame.K_LEFT]:
@@ -698,6 +948,8 @@ def main():
                     camera_x = max(0, min(WORLD_SIZE - WIDTH, camera_x))
                     camera_y = max(0, min(WORLD_SIZE - HEIGHT, camera_y))
                 draw_game(screen, client, camera_x, camera_y, show_radius)
+                char_window.draw()
+                pygame.display.flip()
                 clock.tick(30)
             client.stop()
             running = False

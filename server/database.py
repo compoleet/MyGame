@@ -20,16 +20,14 @@ class Player(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(unique=True)
-    password: Mapped[str]  # храни хеш!
+    password: Mapped[str]
     class_name: Mapped[PlayerClass]
     level: Mapped[int] = mapped_column(default=1)
     exp: Mapped[int] = mapped_column(default=0)
-    
-    # Позиция в мире
-    x: Mapped[int] = mapped_column(default=500)
-    y: Mapped[int] = mapped_column(default=500)
-    
-    # Статы (бонусные очки, которые игрок распределил)
+
+    x: Mapped[int] = mapped_column(default=50000)
+    y: Mapped[int] = mapped_column(default=50000)
+
     base_str: Mapped[int] = mapped_column(default=5)
     base_spd: Mapped[int] = mapped_column(default=5)
     base_vit: Mapped[int] = mapped_column(default=5)
@@ -37,7 +35,33 @@ class Player(Base):
     base_cha: Mapped[int] = mapped_column(default=5)
     base_lck: Mapped[int] = mapped_column(default=5)
 
-# Создаём движок и фабрику сессий
+class Item(Base):
+    __tablename__ = "items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str]
+    item_type: Mapped[str]   # weapon, armor, consumable, material
+    slot: Mapped[str]        # weapon, head, chest, legs, feet, none
+    value: Mapped[int]
+    stat_bonuses: Mapped[str] = mapped_column(default="{}")
+
+class Inventory(Base):
+    __tablename__ = "inventory"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(index=True)
+    item_id: Mapped[int]
+    quantity: Mapped[int] = mapped_column(default=1)
+
+class Equipment(Base):
+    __tablename__ = "equipment"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(unique=True)
+    weapon: Mapped[int] = mapped_column(nullable=True)
+    head: Mapped[int] = mapped_column(nullable=True)
+    chest: Mapped[int] = mapped_column(nullable=True)
+    legs: Mapped[int] = mapped_column(nullable=True)
+    feet: Mapped[int] = mapped_column(nullable=True)
+
+# Движок и сессия
 engine = create_async_engine("sqlite+aiosqlite:///mmo.db", echo=True)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 

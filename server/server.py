@@ -12,23 +12,25 @@ mobs = {}
 next_mob_id = 1
 
 MOB_TYPES = {
-    "slime": {"hp": 50, "attack": 20, "exp": 20, "level": 3, "speed": 6},
-    "goblin": {"hp": 80, "attack": 30, "exp": 40, "level": 8, "speed": 10},
+    "slime": {"hp": 50, "attack": 20, "exp": 20, "level": 3},
+    "goblin": {"hp": 80, "attack": 30, "exp": 40, "level": 8},
 }
-RESPAWN_TIME = 7
+RESPAWN_TIME = 5
 
+# Мир 100000x100000
 WORLD_SIZE = 100000
 CITY_CENTER = WORLD_SIZE // 2
 CITY_RADIUS = 500
 SAFE_ZONE_RADIUS = CITY_RADIUS
 
+# Зоны спавна мобов (от центра)
 LEVEL_ZONES = {
-    1: (CITY_RADIUS + 300, CITY_RADIUS + 500),   # 800-1000
+    1: (CITY_RADIUS + 300, CITY_RADIUS + 500),
     2: (CITY_RADIUS + 300, CITY_RADIUS + 500),
     3: (CITY_RADIUS + 300, CITY_RADIUS + 500),
     4: (CITY_RADIUS + 300, CITY_RADIUS + 500),
     5: (CITY_RADIUS + 300, CITY_RADIUS + 500),
-    6: (CITY_RADIUS + 550, CITY_RADIUS + 900),   # 1050-1400
+    6: (CITY_RADIUS + 550, CITY_RADIUS + 900),
     7: (CITY_RADIUS + 550, CITY_RADIUS + 900),
     8: (CITY_RADIUS + 550, CITY_RADIUS + 900),
     9: (CITY_RADIUS + 550, CITY_RADIUS + 900),
@@ -93,8 +95,7 @@ async def create_player_in_db(username: str, password: str, class_name: str, sta
             exp=0
         )
         session.add(new_player)
-        await session.flush()   # Важно: теперь new_player.id будет заполнен
-        # Создаём запись экипировки
+        await session.flush()
         equip = Equipment(player_id=new_player.id)
         session.add(equip)
         await session.commit()
@@ -142,7 +143,7 @@ async def save_player_to_db(player_id: int, player_data: dict):
             await session.commit()
 
 # ------------------------------------------------------------
-# Инвентарь и экипировка
+# Инвентарь и экипировка (без изменений)
 # ------------------------------------------------------------
 async def get_player_inventory(player_id: int):
     async with AsyncSessionLocal() as session:
@@ -184,23 +185,19 @@ async def get_player_equipment(player_id: int):
 
 async def equip_item(player_id: int, inv_id: int, slot: str):
     async with AsyncSessionLocal() as session:
-        # Найти предмет в инвентаре
         inv_entry = await session.get(Inventory, inv_id)
         if not inv_entry:
             return False
         item = await session.get(Item, inv_entry.item_id)
         if not item or item.slot != slot:
             return False
-        # Получить экипировку игрока
         equip = await session.execute(select(Equipment).where(Equipment.player_id == player_id))
         equip_row = equip.scalar_one_or_none()
         if not equip_row:
             equip_row = Equipment(player_id=player_id)
             session.add(equip_row)
-        # Снять текущий предмет (если есть) – положить обратно в инвентарь
         old_item_id = getattr(equip_row, slot)
         if old_item_id:
-            # Проверить, есть ли уже такой предмет в инвентаре (стек)
             existing = await session.execute(select(Inventory).where(Inventory.player_id == player_id, Inventory.item_id == old_item_id))
             existing_row = existing.scalar_one_or_none()
             if existing_row:
@@ -208,9 +205,7 @@ async def equip_item(player_id: int, inv_id: int, slot: str):
             else:
                 new_inv = Inventory(player_id=player_id, item_id=old_item_id, quantity=1)
                 session.add(new_inv)
-        # Экипировать новый
         setattr(equip_row, slot, inv_entry.item_id)
-        # Убрать из инвентаря
         if inv_entry.quantity > 1:
             inv_entry.quantity -= 1
         else:
@@ -219,7 +214,7 @@ async def equip_item(player_id: int, inv_id: int, slot: str):
         return True
 
 # ------------------------------------------------------------
-# Игровая логика (без изменений, кроме добавления дропа)
+# Игровая логика
 # ------------------------------------------------------------
 def set_player_position(player_id, x, y):
     players[player_id]["x"] = x
@@ -237,7 +232,7 @@ def calculate_damage(attacker_stats, defender_stats, weapon_damage=30):
     return max(1, final_damage)
 
 # ------------------------------------------------------------
-# Игроки: спавн, движение, атака
+# Обработчики игроков
 # ------------------------------------------------------------
 async def send_existing_players(websocket, current_id):
     for pid, pdata in players.items():
@@ -342,7 +337,7 @@ async def handle_attack(player_id, data):
                 await pdata["websocket"].send(json.dumps({"type": "move", "player_id": target_id, "x": CITY_CENTER, "y": CITY_CENTER}))
 
 # ------------------------------------------------------------
-# Мобы с дропом
+# Мобы
 # ------------------------------------------------------------
 def spawn_mob(x, y, mob_type="slime"):
     if is_in_safe_zone(x, y):
@@ -408,24 +403,17 @@ async def mob_attack(mob_id, player_id):
                 await pdata["websocket"].send(json.dumps({"type": "move", "player_id": player_id, "x": CITY_CENTER, "y": CITY_CENTER}))
 
 async def mob_ai():
-    # Настройки
-    MOVE_INTERVAL = 0.033   # примерно 30 fps (0.033 сек)
-    AGGRO_INTERVAL = 0.5    # проверка агрессии каждые 0.5 сек
-    MOVE_STEP = 8           # шаг моба за один тик (пикселей)
-    AGRO_RANGE = 400        # дистанция, с которой моб замечает игрока
-    ATTACK_RANGE = 50       # дистанция для атаки
-
-    last_aggro_check = 0
     while True:
-        start_time = asyncio.get_event_loop().time()
-        
-        # Движение (каждый тик)
+        await asyncio.sleep(1)
         for mob_id, mob in list(mobs.items()):
-            # Движение к игроку или блуждание
+            if random.random() < 0.5:
+                dx = random.randint(-15, 15)
+                dy = random.randint(-15, 15)
+                new_x = mob["x"] + dx
+                new_y = mob["y"] + dy
+                await move_mob(mob_id, new_x, new_y)
             nearest = None
-            min_dist = AGRO_RANGE
-            # Поиск ближайшего игрока (только для выбора направления, не каждый тик, но можно)
-            # Для оптимизации можно искать реже, но здесь оставим каждый тик для быстрой реакции
+            min_dist = 350
             for pid, pdata in players.items():
                 if is_in_safe_zone(pdata["x"], pdata["y"]):
                     continue
@@ -433,48 +421,8 @@ async def mob_ai():
                 if dist < min_dist:
                     min_dist = dist
                     nearest = pid
-            if nearest:
-                # Движение к игроку
-                target = players[nearest]
-                dx = target["x"] - mob["x"]
-                dy = target["y"] - mob["y"]
-                length = max(1, abs(dx) + abs(dy))
-                step_x = int(MOVE_STEP * dx / length)
-                step_y = int(MOVE_STEP * dy / length)
-                new_x = mob["x"] + step_x
-                new_y = mob["y"] + step_y
-            else:
-                # Случайное блуждание
-                dx = random.randint(-MOVE_STEP, MOVE_STEP)
-                dy = random.randint(-MOVE_STEP, MOVE_STEP)
-                new_x = mob["x"] + dx
-                new_y = mob["y"] + dy
-            # Проверка границ и safe zone
-            new_x = max(0, min(WORLD_SIZE, new_x))
-            new_y = max(0, min(WORLD_SIZE, new_y))
-            if not is_in_safe_zone(new_x, new_y):
-                await move_mob(mob_id, new_x, new_y)
-
-        # Атака и агрессия – реже
-        if asyncio.get_event_loop().time() - last_aggro_check >= AGGRO_INTERVAL:
-            last_aggro_check = asyncio.get_event_loop().time()
-            for mob_id, mob in list(mobs.items()):
-                nearest = None
-                min_dist = AGRO_RANGE
-                for pid, pdata in players.items():
-                    if is_in_safe_zone(pdata["x"], pdata["y"]):
-                        continue
-                    dist = abs(pdata["x"] - mob["x"]) + abs(pdata["y"] - mob["y"])
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest = pid
-                if nearest and min_dist < ATTACK_RANGE:
-                    await mob_attack(mob_id, nearest)
-
-        # Задержка до следующего тика с учётом времени выполнения
-        elapsed = asyncio.get_event_loop().time() - start_time
-        sleep_time = max(0, MOVE_INTERVAL - elapsed)
-        await asyncio.sleep(sleep_time)
+            if nearest and min_dist < 40:
+                await mob_attack(mob_id, nearest)
 
 async def respawn_mob_after_delay(mob_type, x, y):
     await asyncio.sleep(RESPAWN_TIME)
@@ -484,10 +432,8 @@ async def respawn_mob_after_delay(mob_type, x, y):
     spawn_mob(new_x, new_y, mob_type)
 
 async def drop_loot(player_id, mob_type):
-    # Простой дроп: с вероятностью 30% даём зелье здоровья
     if random.random() < 0.3:
         async with AsyncSessionLocal() as session:
-            # Найти предмет "Зелье здоровья" (id=1 предположительно)
             item = await session.execute(select(Item).where(Item.name == "Зелье здоровья"))
             item_row = item.scalar_one_or_none()
             if item_row:
@@ -499,7 +445,6 @@ async def drop_loot(player_id, mob_type):
                     new_inv = Inventory(player_id=player_id, item_id=item_row.id, quantity=1)
                     session.add(new_inv)
                 await session.commit()
-                # Уведомить клиента (позже)
 
 async def handle_attack_mob(player_id, data, websocket):
     mob_id = data.get("mob_id")
@@ -525,11 +470,57 @@ async def handle_attack_mob(player_id, data, websocket):
             attacker["exp"] -= exp_needed
             exp_needed = 100 * attacker["level"]
         await websocket.send(json.dumps({"type": "exp_update", "exp": attacker["exp"], "level": attacker["level"]}))
-        # Дроп
         await drop_loot(player_id, mob["type"])
         mob_type = mob["type"]
         await despawn_mob(mob_id)
         asyncio.create_task(respawn_mob_after_delay(mob_type, mob["x"], mob["y"]))
+
+# ------------------------------------------------------------
+# Обработчики предметов
+# ------------------------------------------------------------
+async def use_item(player_id: int, inv_id: int):
+    async with AsyncSessionLocal() as session:
+        inv_entry = await session.get(Inventory, inv_id)
+        if not inv_entry:
+            return False
+        item = await session.get(Item, inv_entry.item_id)
+        if not item or item.item_type != "consumable":
+            return False
+        if item.name == "Зелье здоровья":
+            stats = players[player_id]["stats"]
+            stats.current_hp = min(stats.calculate_health(), stats.current_hp + 50)
+            if inv_entry.quantity > 1:
+                inv_entry.quantity -= 1
+            else:
+                await session.delete(inv_entry)
+            await session.commit()
+            await players[player_id]["websocket"].send(json.dumps({"type": "hp_update", "hp": stats.current_hp}))
+            return True
+    return False
+
+async def drop_item(player_id: int, inv_id: int):
+    async with AsyncSessionLocal() as session:
+        inv_entry = await session.get(Inventory, inv_id)
+        if not inv_entry:
+            return False
+        if inv_entry.quantity > 1:
+            inv_entry.quantity -= 1
+        else:
+            await session.delete(inv_entry)
+        await session.commit()
+        return True
+
+async def destroy_item(player_id: int, inv_id: int):
+    async with AsyncSessionLocal() as session:
+        inv_entry = await session.get(Inventory, inv_id)
+        if not inv_entry:
+            return False
+        if inv_entry.quantity > 1:
+            inv_entry.quantity -= 1
+        else:
+            await session.delete(inv_entry)
+        await session.commit()
+        return True
 
 # ------------------------------------------------------------
 # Диспетчер сообщений
@@ -576,7 +567,6 @@ async def handle_player_input(websocket):
                     slot = data.get("slot")
                     success = await equip_item(player_id, inv_id, slot)
                     if success:
-                        # После экипировки пересылаем обновлённые данные
                         inv = await get_player_inventory(player_id)
                         equip = await get_player_equipment(player_id)
                         await websocket.send(json.dumps({"type": "inventory_data", "inventory": inv, "equipment": equip}))
@@ -609,69 +599,7 @@ async def handle_player_input(websocket):
             await save_player_to_db(player_id, data_to_save)
             await notify_despawn(player_id)
             del players[player_id]
- # ------------------------------------------------------------
-#инвентарь
-# ------------------------------------------------------------           
-async def use_item(player_id: int, inv_id: int):
-    async with AsyncSessionLocal() as session:
-        inv_entry = await session.get(Inventory, inv_id)
-        if not inv_entry:
-            return False
-        item = await session.get(Item, inv_entry.item_id)
-        if not item:
-            return False
-        # Только расходники (consumable) пока
-        if item.item_type != "consumable":
-            return False
-        # Пример: зелье здоровья восстанавливает 50 HP
-        if item.name == "Зелье здоровья":
-            # Получаем игрока
-            player = await session.get(Player, player_id)
-            if player:
-                # Здесь нужно обновить текущее HP игрока в памяти сервера (players[player_id]["stats"].current_hp)
-                # Но проще отправить событие клиенту, а клиент сам увеличит HP (с проверкой на сервере при следующей атаке)
-                # Для упрощения: добавим временное поле в stats
-                stats = players[player_id]["stats"]
-                stats.current_hp = min(stats.calculate_health(), stats.current_hp + 50)
-                # Уменьшаем количество предмета
-                if inv_entry.quantity > 1:
-                    inv_entry.quantity -= 1
-                else:
-                    await session.delete(inv_entry)
-                await session.commit()
-                # Уведомить клиента об изменении HP
-                await players[player_id]["websocket"].send(json.dumps({
-                    "type": "hp_update",
-                    "hp": stats.current_hp
-                }))
-                return True
-        return False
 
-async def drop_item(player_id: int, inv_id: int):
-    async with AsyncSessionLocal() as session:
-        inv_entry = await session.get(Inventory, inv_id)
-        if not inv_entry:
-            return False
-        # Удаляем предмет из инвентаря
-        if inv_entry.quantity > 1:
-            inv_entry.quantity -= 1
-        else:
-            await session.delete(inv_entry)
-        await session.commit()
-        # TODO: создать сущность "дроп" на земле (пока пропустим)
-        return True
-
-async def destroy_item(player_id: int, inv_id: int):
-    async with AsyncSessionLocal() as session:
-        inv_entry = await session.get(Inventory, inv_id)
-        if not inv_entry:
-            return False
-        if inv_entry.quantity > 1:
-            inv_entry.quantity -= 1
-        else:
-            await session.delete(inv_entry)
-        await session.commit()
-        return True
 # ------------------------------------------------------------
 # Запуск
 # ------------------------------------------------------------
